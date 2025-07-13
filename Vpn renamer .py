@@ -105,6 +105,22 @@ class VpnConfigEditorApp(tk.Tk):
         frame.pack(fill=tk.X)
         self.process_button = ttk.Button(frame, text="⚙️ پردازش و جداسازی", command=self.start_processing)
         self.process_button.pack(fill=tk.X, pady=5)
+
+        # Added Files Section
+        added_files_frame = ttk.LabelFrame(parent, text="فایل‌های اضافه شده", padding=10)
+        added_files_frame.pack(fill=tk.X, pady=(10, 0))
+
+        added_files_buttons_frame = ttk.Frame(added_files_frame)
+        added_files_buttons_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.remove_selected_file_button = ttk.Button(added_files_buttons_frame, text="حذف انتخاب شده", command=self.remove_selected_file, style="Link.TButton")
+        self.remove_selected_file_button.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.clear_added_files_button = ttk.Button(added_files_buttons_frame, text="پاک کردن لیست", command=self.clear_added_files, style="Link.TButton")
+        self.clear_added_files_button.pack(side=tk.LEFT)
+
+        self.added_files_tree = self._create_treeview_tab(added_files_frame, "", {"نام فایل": 300}, is_notebook_tab=False)
+
         self.load_button = ttk.Button(frame, text="📂 انتخاب فایل(ها)", command=self.load_from_file, style="Secondary.TButton")
         self.load_button.pack(fill=tk.X, pady=5)
         self.clear_button = ttk.Button(frame, text="🗑️ پاک‌سازی همه", command=self.clear_all, style="Secondary.TButton")
@@ -385,7 +401,39 @@ class VpnConfigEditorApp(tk.Tk):
         return self._parse_vless_or_trojan(line, new_name, 'vless')
 
     def _parse_trojan(self, line, new_name):
-        return self._parse_vless_or_trojan(line, new_name, 'trojan')
+        # Trojan links can have passwords with special characters.
+        # Handle them by not including the password in the regex
+        try:
+            return self._parse_vless_or_trojan(line, new_name, 'trojan')
+        except ValueError:
+            # Fallback for complex passwords
+            match = re.match(r"trojan://(?P<user_info>[^@]+)@(?P<host_port_and_fragment>.+)", line)
+            if not match:
+                raise ValueError("ساختار لینک Trojan نامعتبر است.")
+
+            parts = match.groupdict()
+            user_info = parts['user_info']
+            host_port_and_fragment = parts['host_port_and_fragment']
+
+            # The rest of the URL can be parsed normally
+            parsed_url = urllib.parse.urlparse(f"trojan://{host_port_and_fragment}")
+
+            data = {'type': 'trojan', 'protocol': 'TROJAN', 'name': new_name}
+            data['host'] = parsed_url.hostname
+            data['port'] = parsed_url.port
+            data['original_name'] = urllib.parse.unquote(parsed_url.fragment) if parsed_url.fragment else '(بدون نام)'
+
+            query_params = dict(urllib.parse.parse_qsl(parsed_url.query))
+            sni = query_params.get('sni', query_params.get('peer', parsed_url.hostname))
+            path = query_params.get('path', 'N/A')
+            net_type = query_params.get('type', 'N/A')
+            data['details'] = f"SNI: {sni} | Net: {net_type} | Path: {path[:20]}"
+
+            base_link = f"trojan://{user_info}@{data['host']}:{data['port']}"
+            if parsed_url.query:
+                base_link += f"?{parsed_url.query}"
+            data['modified_link'] = f"{base_link}#{urllib.parse.quote(new_name)}"
+            return data
 
     def _parse_telegram(self, line, new_name):
         """پردازشگر پراکسی تلگرام با قابلیت استخراج نام از فرگمنت (#)."""
@@ -421,13 +469,14 @@ class VpnConfigEditorApp(tk.Tk):
     def clear_results(self):
         """تمام جداول خروجی و داده‌های ذخیره شده را پاک می‌کند."""
         self.tree_data_map.clear()
-        for tree in [self.v2ray_tree, self.telegram_tree, self.original_names_tree, self.failed_links_tree]:
+        for tree in [self.v2ray_tree, self.telegram_tree, self.original_names_tree, self.failed_links_tree, self.added_files_tree]:
             tree.delete(*tree.get_children())
             
     def clear_all(self):
         if messagebox.askyesno("تایید", "تمام ورودی و خروجی‌ها پاک شوند؟"):
             self.input_text.delete("1.0", tk.END)
             self.clear_results()
+            self.clear_added_files()
             self.update_status("آماده")
 
     def get_full_links_from_tree(self, tree):
@@ -452,20 +501,31 @@ class VpnConfigEditorApp(tk.Tk):
 
     def copy_all(self, tree):
         if links := self.get_full_links_from_tree(tree):
-            self.clipboard_clear()
-            self.clipboard_append("\n".join(filter(None, links)))
-            self.update_status(f"{len(links)} لینک در کلیپ‌بورد کپی شد.")
+            # Filter out empty or None links before joining
+            valid_links = [link for link in links if link]
+            if valid_links:
+                self.clipboard_clear()
+                self.clipboard_append("\n".join(valid_links))
+                self.update_status(f"{len(valid_links)} لینک در کلیپ‌بورد کپی شد.")
+            else:
+                self.update_status("محتوایی برای کپی کردن وجود ندارد.", error=True)
         else:
             self.update_status("محتوایی برای کپی کردن وجود ندارد.", error=True)
     
     def save_to_file(self, tree):
-        if not (links := self.get_full_links_from_tree(tree)):
+        links = self.get_full_links_from_tree(tree)
+        valid_links = [link for link in links if link]
+
+        if not valid_links:
             self.update_status("محتوایی برای ذخیره کردن وجود ندارد.", error=True)
             return
-        if not (filepath := filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Documents", "*.txt")], title="ذخیره فایل")): return
+
+        if not (filepath := filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Documents", "*.txt"), ("All Files", "*.*")], title="ذخیره فایل")):
+            return
+
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write("\n".join(filter(None, links)))
+                f.write("\n".join(valid_links))
             self.update_status(f"فایل با موفقیت در {filepath} ذخیره شد.")
         except Exception as e:
             self.update_status(f"خطا در ذخیره فایل: {e}", error=True)
@@ -485,6 +545,22 @@ class VpnConfigEditorApp(tk.Tk):
         if all_links:
             self.input_text.insert(tk.END, "\n".join(all_links) + "\n")
             self.update_status(f"{len(filepaths)} فایل با موفقیت بارگذاری شد.")
+
+    def remove_selected_file(self):
+        selected_items = self.added_files_tree.selection()
+        if not selected_items:
+            return
+
+        for item_id in selected_items:
+            file_path = self.tree_data_map[item_id]['path']
+            if file_path in self.file_contents:
+                del self.file_contents[file_path]
+            self.added_files_tree.delete(item_id)
+            del self.tree_data_map[item_id]
+
+    def clear_added_files(self):
+        self.added_files_tree.delete(*self.added_files_tree.get_children())
+        self.file_contents.clear()
 
     def _extract_links_from_json(self, data):
         links = []
