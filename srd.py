@@ -127,7 +127,7 @@ class VpnConfigEditorApp(tk.Tk):
         self.added_files_tree.pack(fill=tk.BOTH, expand=True)
 
         self.clear_button = ttk.Button(frame, text="🗑️ پاک‌سازی همه", command=self.clear_all, style="Secondary.TButton")
-        self.clear_button.pack(fill=tk.X, pady=10)
+        self.clear_button.pack(fill=tk.X, pady=10, side=tk.BOTTOM)
 
     def _create_status_bar(self, parent):
         status_frame = ttk.Frame(parent, padding=(10, 5), relief="groove", borderwidth=1)
